@@ -1,0 +1,240 @@
+services:
+  postgresql-east:
+    image: postgres:${POSTGRESQL_VERSION}
+    container_name: postgresql-east
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_USER: temporal
+    networks:
+      - temporal-network
+    volumes:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+  
+  postgresql-west:
+    image: postgres:${POSTGRESQL_VERSION}
+    container_name: postgresql-west
+    ports:
+      - "5532:5432"
+    environment:
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_USER: temporal
+    networks:
+      - temporal-network
+    volumes:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  db-setup-east:
+    image: temporalio/admin-tools:${TEMPORAL_ADMINTOOLS_VERSION}
+    container_name: db-setup-east
+    restart: on-failure:6
+    depends_on:
+      postgresql-east:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql-east
+      - SQL_PASSWORD=temporal
+    networks:
+      - temporal-network
+    volumes:
+      - ./scripts:/scripts
+    entrypoint: ["/bin/sh"]
+    command: /scripts/setup-postgres.sh
+
+  db-setup-west:
+    image: temporalio/admin-tools:${TEMPORAL_ADMINTOOLS_VERSION}
+    container_name: db-setup-west
+    restart: on-failure:6
+    depends_on:
+      postgresql-west:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql-west
+      - SQL_PASSWORD=temporal
+    networks:
+      - temporal-network
+    volumes:
+      - ./scripts:/scripts
+    entrypoint: ["/bin/sh"]
+    command: /scripts/setup-postgres.sh
+
+  temporal-east:
+    image: temporalio/server:${TEMPORAL_VERSION}
+    container_name: temporal-east
+    depends_on:
+      db-setup-east:
+        condition: service_completed_successfully
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql-east
+      - BIND_ON_IP=0.0.0.0
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+      - TEMPORAL_SERVER_CONFIG_FILE_PATH=config/development.yaml
+    networks:
+      - temporal-network
+    ports:
+      - '7233:7233'
+    volumes:
+      - ./config/dynamicconfig:/etc/temporal/config/dynamicconfig
+      - ./config/development-east.yaml:/etc/temporal/config/development.yaml
+    tty: true
+    stdin_open: true
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "7233"]
+      interval: 5s
+      timeout: 3s
+      start_period: 30s
+      retries: 60
+
+  temporal-west:
+    image: temporalio/server:${TEMPORAL_VERSION}
+    container_name: temporal-west
+    depends_on:
+      db-setup-west:
+        condition: service_completed_successfully
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql-west
+      - BIND_ON_IP=0.0.0.0
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+      - TEMPORAL_SERVER_CONFIG_FILE_PATH=config/development.yaml
+    networks:
+      - temporal-network
+    ports:
+      - '7333:7233'
+    volumes:
+      - ./config/dynamicconfig:/etc/temporal/config/dynamicconfig
+      - ./config/development-west.yaml:/etc/temporal/config/development.yaml
+    tty: true
+    stdin_open: true
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "7233"]
+      interval: 5s
+      timeout: 3s
+      start_period: 30s
+      retries: 60
+
+  create-ns-east:
+    image: temporalio/admin-tools:${TEMPORAL_ADMINTOOLS_VERSION}
+    container_name: create-ns-east
+    restart: on-failure:5
+    depends_on:
+      temporal-east:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal-east:7233
+      - DEFAULT_NAMESPACE=default
+    networks:
+      - temporal-network
+    volumes:
+      - ./scripts/create-namespace.sh:/scripts/create-namespace.sh
+    entrypoint: ["/bin/sh"]
+    command: /scripts/create-namespace.sh
+
+  create-ns-west:
+    image: temporalio/admin-tools:${TEMPORAL_ADMINTOOLS_VERSION}
+    container_name: create-ns-west
+    restart: on-failure:5
+    depends_on:
+      temporal-west:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal-west:7233
+      - DEFAULT_NAMESPACE=default
+    networks:
+      - temporal-network
+    volumes:
+      - ./scripts/create-namespace.sh:/scripts/create-namespace.sh
+    entrypoint: ["/bin/sh"]
+    command: /scripts/create-namespace.sh
+
+  admin-east:
+    image: temporalio/admin-tools:${TEMPORAL_ADMINTOOLS_VERSION}
+    container_name: admin-east
+    restart: on-failure:5
+    depends_on:
+      temporal-east:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal-east:7233
+      - DEFAULT_NAMESPACE=default
+    tty: true
+    stdin_open: true
+    networks:
+      - temporal-network
+    command: /bin/sh
+  admin-west:
+    image: temporalio/admin-tools:${TEMPORAL_ADMINTOOLS_VERSION}
+    container_name: admin-west
+    restart: on-failure:5
+    depends_on:
+      temporal-west:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal-west:7233
+      - DEFAULT_NAMESPACE=default
+    tty: true
+    stdin_open: true
+    networks:
+      - temporal-network
+    command: /bin/sh
+
+  ui-east:
+    container_name: ui-east
+    depends_on:
+      temporal-east:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal-east:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    image: temporalio/ui:${TEMPORAL_UI_VERSION}
+    networks:
+      - temporal-network
+    ports:
+      - 8080:8080
+
+  ui-west:
+    container_name: ui-west
+    depends_on:
+      temporal-west:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal-west:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    image: temporalio/ui:${TEMPORAL_UI_VERSION}
+    networks:
+      - temporal-network
+    ports:
+      - 8180:8080
+
+networks:
+  temporal-network:
+    driver: bridge
+    name: temporal-network
